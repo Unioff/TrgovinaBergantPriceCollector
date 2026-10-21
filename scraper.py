@@ -1,10 +1,11 @@
-﻿import json
+import json
 import os
 import re
 import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -16,20 +17,14 @@ HITRINAKUP_PASS = "V.9V-P!MeE5yVht"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 DB_PATH = Path(__file__).with_name("prices.db")
 
-
-def init_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
-
-
-def save_price(conn: sqlite3.Connection, item_id: int, shop: str, price: str) -> None:
-    conn.execute(
-        "INSERT INTO prices (item_id, shop, price, scraped_at) VALUES (?, ?, ?, ?)",
-        (item_id, shop, float(price), datetime.now().isoformat(timespec="seconds")),
-    )
-    conn.commit()
+QUERY = """
+SELECT a.id AS artikel_id, a.name AS artikel, t.ID AS trgovina_id, t.Name AS trgovina,
+       t.base_url, u.url
+FROM artikel_url u
+JOIN artikel a ON a.id = u.artikel_id
+JOIN trgovina t ON t.ID = u.trgovina_id
+ORDER BY a.id, t.ID
+"""
 
 
 def get_soup(url: str) -> BeautifulSoup:
@@ -111,27 +106,62 @@ def get_hitrinakup_prices(urls: list[str]) -> list[str | None]:
     return results
 
 
-if __name__ == "__main__":
-    conn = init_db()
-    items = conn.execute("SELECT * FROM items ORDER BY id").fetchall()
-    try:
-        hitrinakup = get_hitrinakup_prices([item["hitrinakup_url"] for item in items])
-        for item, hn_price in zip(items, hitrinakup):
-            spar = get_spar_price(item["spar_url"])
-            mercator = get_mercator_price(item["mercator_url"])
+# Scraper se izbere glede na gostitelja iz trgovina.base_url; trgovine brez scraperja (npr. TrgovinaBergant) so ročne.
+SCRAPERS = {
+    "mercatoronline.si": get_mercator_price,
+    "online.spar.si": get_spar_price,
+}
+HITRINAKUP_HOST = "hitrinakup.com"
 
-            print(item["name"])
-            for shop, label, price in (
-                ("spar", "Spar", spar),
-                ("mercator", "Mercator", mercator),
-                ("hitrinakup", "Hitri Nakup", hn_price),
-            ):
-                if price:
-                    save_price(conn, item["id"], shop, price)
-                    print(f"  {label}: {price} €")
-                else:
-                    print(f"  {label}: cena ni najdena")
-    except (requests.RequestException, PlaywrightError, RuntimeError) as e:
+
+def host_of(url: str | None) -> str:
+    return (urlparse(url or "").hostname or "").removeprefix("www.")
+
+
+def scrape(rows: list[sqlite3.Row]) -> list[str | None]:
+    prices: list[str | None] = [None] * len(rows)
+
+    for i, row in enumerate(rows):
+        scraper = SCRAPERS.get(host_of(row["base_url"]))
+        if scraper is None:
+            continue
+        try:
+            prices[i] = scraper(row["url"])
+        except requests.RequestException as e:
+            print(f"Napaka ({row['trgovina']}, {row['artikel']}): {e}", file=sys.stderr)
+
+    hn_rows = [i for i, row in enumerate(rows) if host_of(row["base_url"]) == HITRINAKUP_HOST]
+    if hn_rows:
+        for i, price in zip(hn_rows, get_hitrinakup_prices([rows[i]["url"] for i in hn_rows])):
+            prices[i] = price
+
+    return prices
+
+
+if __name__ == "__main__":
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        rows = conn.execute(QUERY).fetchall()
+        prices = scrape(rows)
+
+        last_artikel = None
+        for row, price in zip(rows, prices):
+            if row["artikel_id"] != last_artikel:
+                print(row["artikel"])
+                last_artikel = row["artikel_id"]
+
+            if price:
+                conn.execute(
+                    "INSERT INTO cena (artikel_id, trgovina_id, date, price) VALUES (?, ?, ?, ?)",
+                    (row["artikel_id"], row["trgovina_id"], datetime.now().isoformat(timespec="seconds"), float(price)),
+                )
+                print(f"  {row['trgovina']}: {price} €")
+            else:
+                print(f"  {row['trgovina']}: cena ni najdena")
+        conn.commit()
+    except (PlaywrightError, RuntimeError) as e:
         sys.exit(f"Napaka pri nalaganju strani: {e}")
     finally:
         conn.close()
