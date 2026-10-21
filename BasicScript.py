@@ -1,30 +1,35 @@
 ﻿import json
 import os
 import re
+import sqlite3
 import sys
+from datetime import datetime
+from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
-ITEMS = [
-    {
-        "name": "Barcaffe 100g",
-        "mercator": "https://mercatoronline.si/izdelek/28867/mleta-kava-classic-barcaffe-100-g",
-        "spar": "https://online.spar.si/p/mleta-kava-classic-barcaffe-100g-41060",
-        "hitrinakup": "https://hitrinakup.com/izdelki/24",
-    },
-    {
-        "name": "Zlate Jusne Kroglice 90g",
-        "mercator": "https://mercatoronline.si/izdelek/31419/zlate-kroglice-zito-90-g",
-        "spar": "https://online.spar.si/p/zlate-kroglice-intes-90g-41211",
-        "hitrinakup": "https://hitrinakup.com/izdelki/17688",
-    },
-]
 HITRINAKUP_USER = "perc.jeraj@gmail.com"
 HITRINAKUP_PASS = "V.9V-P!MeE5yVht"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
+DB_PATH = Path(__file__).with_name("prices.db")
+
+
+def init_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def save_price(conn: sqlite3.Connection, item_id: int, shop: str, price: str) -> None:
+    conn.execute(
+        "INSERT INTO prices (item_id, shop, price, scraped_at) VALUES (?, ?, ?, ?)",
+        (item_id, shop, float(price), datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
 
 
 def get_soup(url: str) -> BeautifulSoup:
@@ -107,15 +112,26 @@ def get_hitrinakup_prices(urls: list[str]) -> list[str | None]:
 
 
 if __name__ == "__main__":
+    conn = init_db()
+    items = conn.execute("SELECT * FROM items ORDER BY id").fetchall()
     try:
-        hitrinakup = get_hitrinakup_prices([item["hitrinakup"] for item in ITEMS])
-        for item, hn_price in zip(ITEMS, hitrinakup):
-            spar = get_spar_price(item["spar"])
-            mercator = get_mercator_price(item["mercator"])
+        hitrinakup = get_hitrinakup_prices([item["hitrinakup_url"] for item in items])
+        for item, hn_price in zip(items, hitrinakup):
+            spar = get_spar_price(item["spar_url"])
+            mercator = get_mercator_price(item["mercator_url"])
 
             print(item["name"])
-            print(f"  Spar: {spar} €" if spar else "  Spar: cena ni najdena")
-            print(f"  Mercator: {mercator} €" if mercator else "  Mercator: cena ni najdena")
-            print(f"  Hitri Nakup: {hn_price} €" if hn_price else "  Hitri Nakup: cena ni najdena")
+            for shop, label, price in (
+                ("spar", "Spar", spar),
+                ("mercator", "Mercator", mercator),
+                ("hitrinakup", "Hitri Nakup", hn_price),
+            ):
+                if price:
+                    save_price(conn, item["id"], shop, price)
+                    print(f"  {label}: {price} €")
+                else:
+                    print(f"  {label}: cena ni najdena")
     except (requests.RequestException, PlaywrightError, RuntimeError) as e:
         sys.exit(f"Napaka pri nalaganju strani: {e}")
+    finally:
+        conn.close()

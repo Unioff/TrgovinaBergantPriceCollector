@@ -3,3 +3,9 @@
 requests==2.32.5
 beautifulsoup4==4.15.0
 playwright==1.64.0
+
+# SQLite: the sqlite3 module is part of Python, nothing to pip install. Also copy prices.db to the new PC.
+# Optional database tools (not pip packages):
+#   DB Browser for SQLite (editable grid): winget install DBBrowserForSQLite.DBBrowserForSQLite
+#   VS Code extensions: mtxr.sqltools, mtxr.sqltools-driver-sqlite, cweijan.vscode-database-client2
+#   SQLTools driver needs: npm.cmd install sqlite3@5.1.7 --prefix "%LOCALAPPDATA%\vscode-sqltools\Data"
